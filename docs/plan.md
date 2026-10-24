@@ -35,9 +35,11 @@ These rules live in `packages/core/src/tripMachine.ts`. Do not copy them into ap
 
 1. The phone writes every point to SQLite first. A dead zone or app kill must not lose points.
 2. The phone uploads through an outbox in SQLite, in order: `trips.start`, then `trips.appendChunk` for each chunk of up to 500 points (`CHUNK_SIZE`), then `trips.finish`.
-3. Every call is idempotent. `start` is keyed by `clientId` (UUID made on the phone). `appendChunk` is keyed by `(clientId, seq)`. `finish` on a completed trip with the same values is a no-op.
-4. Chunks upload during the trip when there is signal. Failed calls retry with backoff. Order is kept per trip.
-5. Convex recomputes stats from the chunks with `tripStats` from `@vyra/core` on finish, on a late chunk, and on every edit. It keeps `dailyTotals` correct by removing the old trip contribution and adding the new one.
+3. Every call is idempotent. `start` is keyed by `clientId` (UUID made on the phone). `appendChunk` is keyed by `(clientId, seq)`. `finish` on a completed, deleted or merged trip is a no-op.
+4. `remove` and `merge` write a row in `tripTombstones` for the `clientId` that goes away. Phone retries for a tombstoned `clientId` are acknowledged and change nothing, so a retry cannot bring back a deleted trip.
+5. Each local trip stores the Clerk user ID that recorded it. The outbox uploads only trips of the signed-in user. A trip recorded while signed out uploads only after the user confirms it.
+6. Chunks upload during the trip when there is signal. Failed calls retry with backoff. Order is kept per trip.
+7. Convex recomputes stats from the chunks with `tripStats` from `@vyra/core` on finish, on a late chunk, and on every edit. It keeps `dailyTotals` correct by removing the old trip contribution and adding the new one.
 
 ## Convex functions
 
@@ -77,7 +79,9 @@ export function addActivityListener(cb: (e: { activity: MotionActivity; confiden
 export function addDriveDetectedListener(cb: (e: { at: number }) => void): { remove(): void }
 ```
 
-On a significant location change, the module asks CoreMotion for activity in the last 5 min. If it finds automotive with medium or high confidence, it stores the time as a pending drive start and sends `onDriveDetected`. iOS can relaunch the app in the background for this, so the module must arm itself at app launch.
+On a significant location change, the module asks CoreMotion for activity in the last 5 min. If it finds a new automotive interval with medium or high confidence, it stores the interval start as a pending drive start and sends `onDriveDetected`. One interval is reported once. iOS can relaunch the app in the background for this, so the module must arm itself at app launch.
+
+JS consumes the pending start with `takePendingDriveStart()` after a live event and at launch. Turning detection off clears it. A pending start older than 30 min is ignored.
 
 ## UI rules
 
