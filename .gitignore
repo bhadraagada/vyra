@@ -12,3 +12,5 @@ dist/
 .convex/
 coverage/
 .secrets.env
+
+.vercel/
