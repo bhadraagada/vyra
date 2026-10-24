@@ -1,0 +1,30 @@
+{
+  "name": "@vyra/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "next typegen && tsc --noEmit",
+    "lint": "echo no linter configured"
+  },
+  "dependencies": {
+    "@clerk/nextjs": "^7.9.19",
+    "@vyra/backend": "workspace:*",
+    "@vyra/core": "workspace:*",
+    "convex": "^1.48.0",
+    "maplibre-gl": "^6.15.0",
+    "next": "^16.4.2",
+    "react": "19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^24.19.2",
+    "@types/react": "~19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^6.0.3"
+  }
+}
