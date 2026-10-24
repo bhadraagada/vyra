@@ -1,0 +1,13 @@
+node_modules/
+.turbo/
+.next/
+dist/
+.expo/
+ios/
+android/
+*.ipa
+.env
+.env.local
+.env*.local
+.convex/
+coverage/

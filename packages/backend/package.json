@@ -1,0 +1,21 @@
+{
+  "name": "@vyra/backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "convex dev",
+    "typecheck": "tsc -p convex",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vyra/core": "workspace:*",
+    "convex": "^1.48.0"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "@types/node": "^24.19.2",
+    "convex-test": "^0.0.65",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
+  }
+}
