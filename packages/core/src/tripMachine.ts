@@ -75,7 +75,8 @@ export function nextState(state: TripState, event: TripEvent): TripState {
       return complete(state, event.at, event.reason)
     case "location": {
       const p = event.point
-      const moving = p.accuracy <= MAX_ACCURACY_M && (p.speed ?? 0) >= MOVING_SPEED_MPS
+      // A walking pace is above MOVING_SPEED_MPS. While on foot, only driving may move the trip end.
+      const moving = state.walkingSince === null && p.accuracy <= MAX_ACCURACY_M && (p.speed ?? 0) >= MOVING_SPEED_MPS
       return checkAutoStop(moving ? { ...state, lastMovingAt: Math.max(state.lastMovingAt, p.t) } : state, p.t)
     }
     case "activity": {

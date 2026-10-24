@@ -45,6 +45,17 @@ describe("tripMachine", () => {
     expect(s).toMatchObject({ kind: "completed", reason: "walking", endedAt: 30_000 })
   })
 
+  it("does not move the end of a walking stop to walking-speed GPS points", () => {
+    const s = run([
+      { type: "start", at: 0, source: "motion" },
+      { type: "location", point: pt(30_000, 19, 72, 12) },
+      { type: "activity", at: 40_000, activity: "walking" },
+      { type: "location", point: pt(70_000, 19, 72, 1.5) },
+      { type: "tick", at: 100_000 },
+    ])
+    expect(s).toMatchObject({ kind: "completed", reason: "walking", endedAt: 30_000 })
+  })
+
   it("ends an unconnected trip after the idle timeout", () => {
     const s = run([
       { type: "start", at: 0, source: "manual" },

@@ -87,6 +87,16 @@ export default defineSchema({
     ...pointColumns,
   }).index("by_trip_seq", ["tripId", "seq"]),
 
+  /**
+   * clientIds of trips the user deleted or merged into another trip.
+   * start, appendChunk and finish ignore these, so a late phone retry does not bring a trip back or fail.
+   */
+  tripTombstones: defineTable({
+    ownerId: v.string(),
+    clientId: v.string(),
+    kind: v.union(v.literal("deleted"), v.literal("merged")),
+  }).index("by_owner_client", ["ownerId", "clientId"]),
+
   /** One row per owner and local day. Updated when a trip completes, is edited or is deleted. */
   dailyTotals: defineTable({
     ownerId: v.string(),

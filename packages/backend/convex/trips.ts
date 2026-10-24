@@ -14,19 +14,31 @@ const tripByClient = (ctx: QueryCtx, owner: string, clientId: string) =>
     .withIndex("by_owner_client", (q) => q.eq("ownerId", owner).eq("clientId", clientId))
     .unique()
 
-async function requireTripByClient(ctx: QueryCtx, owner: string, clientId: string) {
+const isTombstoned = async (ctx: QueryCtx, owner: string, clientId: string) =>
+  (await ctx.db
+    .query("tripTombstones")
+    .withIndex("by_owner_client", (q) => q.eq("ownerId", owner).eq("clientId", clientId))
+    .first()) !== null
+
+/** The trip for a phone call, or null when the user deleted or merged it. Throws when the clientId was never used. */
+async function tripForPhone(ctx: QueryCtx, owner: string, clientId: string) {
   const trip = await tripByClient(ctx, owner, clientId)
-  if (!trip) throw new ConvexError("Trip not found")
-  return trip
+  if (trip) return trip
+  if (await isTombstoned(ctx, owner, clientId)) return null
+  throw new ConvexError("Trip not found")
 }
 
-/** Creates the trip, or returns the existing one for a retried clientId. */
+/**
+ * Creates the trip, or returns the existing one for a retried clientId.
+ * Returns null for the clientId of a deleted or merged trip, so a late retry does not create it again.
+ */
 export const start = mutation({
   args: { clientId: v.string(), startSource, startedAt: v.number(), tzOffsetMin: v.number(), vehicleKey },
   handler: async (ctx, args) => {
     const owner = await ownerId(ctx)
     const existing = await tripByClient(ctx, owner, args.clientId)
     if (existing) return existing._id
+    if (await isTombstoned(ctx, owner, args.clientId)) return null
     const vehicleId = (await vehicleByKey(ctx, owner, args.vehicleKey)) ?? (await defaultVehicle(ctx, owner))
     return ctx.db.insert("trips", {
       ownerId: owner,
@@ -52,12 +64,16 @@ export const start = mutation({
   },
 })
 
-/** Stores one chunk. A retried (clientId, seq) is a no-op. A late chunk after finish recomputes the trip. */
+/**
+ * Stores one chunk. A retried (clientId, seq) is a no-op. A late chunk after finish recomputes the trip.
+ * A chunk for a deleted or merged trip is a no-op.
+ */
 export const appendChunk = mutation({
   args: { clientId: v.string(), seq: v.number(), ...pointColumns },
   handler: async (ctx, { clientId, ...chunk }) => {
     const owner = await ownerId(ctx)
-    const trip = await requireTripByClient(ctx, owner, clientId)
+    const trip = await tripForPhone(ctx, owner, clientId)
+    if (!trip) return null
     const columns = [chunk.lat, chunk.lng, chunk.speed, chunk.accuracy, chunk.heading, chunk.altitude]
     if (!Number.isInteger(chunk.seq) || chunk.seq < 0) throw new ConvexError("seq must be a whole number from 0")
     if (columns.some((c) => c.length !== chunk.t.length)) throw new ConvexError("All point columns must have the same length")
@@ -72,20 +88,18 @@ export const appendChunk = mutation({
   },
 })
 
-/** Completes the trip. A repeat call with the same values is a no-op. */
+/**
+ * Completes the trip. The phone sends finish once per trip, so a call on a completed, deleted or merged trip
+ * is a retry. It changes nothing, so it cannot undo a later merge, trim or vehicle edit.
+ */
 export const finish = mutation({
   args: { clientId: v.string(), endedAt: v.number(), stopReason, vehicleKey },
   handler: async (ctx, args) => {
     const owner = await ownerId(ctx)
-    const trip = await requireTripByClient(ctx, owner, args.clientId)
+    const trip = await tripForPhone(ctx, owner, args.clientId)
+    if (!trip || trip.status === "completed") return null
     if (args.endedAt < trip.startedAt) throw new ConvexError("endedAt is before startedAt")
     const vehicleId = (await vehicleByKey(ctx, owner, args.vehicleKey)) ?? trip.vehicleId
-    const same =
-      trip.status === "completed" &&
-      trip.endedAt === args.endedAt &&
-      trip.stopReason === args.stopReason &&
-      trip.vehicleId === vehicleId
-    if (same) return null
     await recompute(ctx, trip, { status: "completed", endedAt: args.endedAt, stopReason: args.stopReason, vehicleId })
     return null
   },
@@ -150,6 +164,7 @@ export const remove = mutation({
     const trip = await ownTrip(ctx, owner, tripId)
     for (const chunk of await tripChunks(ctx, tripId).collect()) await ctx.db.delete("tripChunks", chunk._id)
     await ctx.db.delete("trips", tripId)
+    await ctx.db.insert("tripTombstones", { ownerId: owner, clientId: trip.clientId, kind: "deleted" })
     await refreshDays(ctx, owner, [trip])
   },
 })
@@ -164,7 +179,10 @@ export const setVehicle = mutation({
   },
 })
 
-/** Joins two completed trips into the first one. The chunks of the second move over and the second is deleted. */
+/**
+ * Joins two completed trips into the first one. The chunks of the second move over and the second is deleted.
+ * The clientId of the second gets a tombstone, so phone retries for it are ignored.
+ */
 export const merge = mutation({
   args: { firstId: v.id("trips"), secondId: v.id("trips") },
   handler: async (ctx, { firstId, secondId }) => {
@@ -180,6 +198,7 @@ export const merge = mutation({
       await ctx.db.patch("tripChunks", chunk._id, { tripId: firstId, seq: chunk.seq + lastSeq + 1 })
     }
     await ctx.db.delete("trips", secondId)
+    await ctx.db.insert("tripTombstones", { ownerId: owner, clientId: second.clientId, kind: "merged" })
     const later = (second.endedAt ?? 0) > (first.endedAt ?? 0) ? second : first
     await recompute(ctx, first, {
       startedAt: Math.min(first.startedAt, second.startedAt),

@@ -42,7 +42,7 @@ async function recordTrip(user: User, clientId: string, chunks: GpsPoint[][], en
     await user.mutation(api.trips.appendChunk, { clientId, seq, ...toColumns(points) })
   }
   await user.mutation(api.trips.finish, { clientId, endedAt, stopReason: "manual" })
-  return tripId
+  return tripId!
 }
 
 const page = { paginationOpts: { numItems: 10, cursor: null } }
@@ -67,7 +67,7 @@ describe("trips", () => {
     })
     await alice.mutation(api.trips.appendChunk, { clientId: "c1", seq: 0, ...toColumns(drive(T0, 50)) })
     await alice.mutation(api.trips.appendChunk, { clientId: "c1", seq: 0, ...toColumns(drive(T0, 80)) })
-    const trip = (await alice.query(api.trips.get, { tripId }))!
+    const trip = (await alice.query(api.trips.get, { tripId: tripId! }))!
     expect(trip).toMatchObject({ status: "recording", pointCount: 50 })
     expect(trip.polyline.length).toBeGreaterThanOrEqual(2)
     expect(await alice.query(api.trips.live, {})).toMatchObject({ _id: tripId })
@@ -123,6 +123,39 @@ describe("trips", () => {
     expect(await today(alice)).toMatchObject([{ tripCount: 1, distanceM: merged.distanceM }])
   })
 
+  it("a retried finish does not undo a merge or a vehicle edit", async () => {
+    const { alice } = setup()
+    const firstId = await recordTrip(alice, "c1", [drive(T0, 60)], T0 + 59_000)
+    const secondId = await recordTrip(alice, "c2", [drive(T0 + 120_000, 60, 19.01)], T0 + 179_000)
+    await alice.mutation(api.trips.merge, { firstId, secondId })
+    const swift = await alice.mutation(api.vehicles.create, { name: "Swift", triggerKey: "swift" })
+    await alice.mutation(api.trips.setVehicle, { tripId: firstId, vehicleId: swift })
+    const edited = await alice.query(api.trips.get, { tripId: firstId })
+
+    await alice.mutation(api.trips.finish, { clientId: "c1", endedAt: T0 + 59_000, stopReason: "manual" })
+    expect(await alice.query(api.trips.get, { tripId: firstId })).toEqual(edited)
+    expect(await alice.query(api.trips.points, { tripId: firstId })).toHaveLength(120)
+  })
+
+  it("phone retries for a merged or deleted trip are ignored", async () => {
+    const { alice } = setup()
+    const firstId = await recordTrip(alice, "c1", [drive(T0, 60)], T0 + 59_000)
+    const secondId = await recordTrip(alice, "c2", [drive(T0 + 120_000, 60, 19.01)], T0 + 179_000)
+    await alice.mutation(api.trips.merge, { firstId, secondId })
+    const merged = await alice.query(api.trips.get, { tripId: firstId })
+
+    const start = { clientId: "c2", startSource: "manual" as const, startedAt: T0 + 120_000, tzOffsetMin: TZ }
+    expect(await alice.mutation(api.trips.start, start)).toBeNull()
+    await alice.mutation(api.trips.appendChunk, { clientId: "c2", seq: 0, ...toColumns(drive(T0 + 120_000, 5)) })
+    await alice.mutation(api.trips.finish, { clientId: "c2", endedAt: T0 + 179_000, stopReason: "manual" })
+    expect(await alice.query(api.trips.get, { tripId: firstId })).toEqual(merged)
+
+    await alice.mutation(api.trips.remove, { tripId: firstId })
+    expect(await alice.mutation(api.trips.start, { ...start, clientId: "c1", startedAt: T0 })).toBeNull()
+    expect((await alice.query(api.trips.list, page)).page).toEqual([])
+    expect(await today(alice)).toEqual([])
+  })
+
   it("trim keeps only points in range and rewrites the chunk", async () => {
     const { alice } = setup()
     const tripId = await recordTrip(alice, "c1", [drive(T0, 100)], T0 + 99_000)
@@ -175,7 +208,7 @@ describe("vehicles and analytics", () => {
       tzOffsetMin: TZ,
       vehicleKey: "city",
     })
-    expect(await alice.query(api.trips.get, { tripId: shortcutTrip })).toMatchObject({ vehicleId: city })
+    expect(await alice.query(api.trips.get, { tripId: shortcutTrip! })).toMatchObject({ vehicleId: city })
 
     await recordTrip(alice, "r1", [drive(T0 + 3_600_000, 60)], T0 + 3_659_000)
     // Same start and end as r1, but slower, so it is the longest by duration.
@@ -187,5 +220,15 @@ describe("vehicles and analytics", () => {
     const records = await alice.query(api.analytics.records, {})
     expect(records.longestDuration).toMatchObject({ clientId: "r2", durationS: 89 })
     expect(records.biggestDay).toMatchObject({ tripCount: 2 })
+  })
+
+  it("archiving the default vehicle makes the newest active vehicle the default", async () => {
+    const { alice } = setup()
+    const swift = await alice.mutation(api.vehicles.create, { name: "Swift", triggerKey: "swift" })
+    const city = await alice.mutation(api.vehicles.create, { name: "City", triggerKey: "city" })
+    await alice.mutation(api.vehicles.archive, { vehicleId: swift })
+    expect(await alice.query(api.vehicles.get, { vehicleId: city })).toMatchObject({ isDefault: true })
+    await alice.mutation(api.vehicles.archive, { vehicleId: city })
+    expect((await alice.query(api.vehicles.list, {})).filter((x) => x.isDefault)).toEqual([])
   })
 })

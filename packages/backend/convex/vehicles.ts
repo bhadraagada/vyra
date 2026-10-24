@@ -90,11 +90,15 @@ export const setDefault = mutation({
   },
 })
 
-/** Hides the vehicle. Its trips keep the link. If it was the default, no vehicle is default after this. */
+/** Hides the vehicle. Its trips keep the link. If it was the default, the newest active vehicle becomes the default. */
 export const archive = mutation({
   args: { vehicleId: v.id("vehicles") },
   handler: async (ctx, { vehicleId }) => {
-    await ownVehicle(ctx, await ownerId(ctx), vehicleId)
+    const owner = await ownerId(ctx)
+    const vehicle = await ownVehicle(ctx, owner, vehicleId)
     await ctx.db.patch("vehicles", vehicleId, { archived: true, isDefault: false })
+    if (!vehicle.isDefault) return
+    const next = (await ownerVehicles(ctx, owner).order("desc").collect()).find((x) => !x.archived)
+    if (next) await ctx.db.patch("vehicles", next._id, { isDefault: true })
   },
 })
