@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { ConvexError } from "convex/values"
 import type { GpsPoint } from "@vyra/core"
-import { backoffMs, isBusy, isPermanent, retryBusy, shouldStore } from "./rules"
+import { backoffMs, isBusy, isPermanent, retryBusy, shouldStore, tokenFor } from "./rules"
 
 const at = (t: number, lat: number): GpsPoint => ({ t, lat, lng: 0, speed: null, accuracy: 5, heading: null, altitude: null })
 
@@ -48,4 +48,12 @@ describe("retryBusy", () => {
     await expect(retryBusy(() => Promise.reject(other).finally(() => calls++))).rejects.toBe(other)
     expect(calls).toBe(3)
   })
+})
+
+describe("tokenFor", () => {
+  const alice = { userId: "alice", token: "alice-token" }
+  it("sends the owner's trip with the owner's token", () => expect(tokenFor("alice", alice)).toBe("alice-token"))
+  it("holds a trip of another account", () => expect(tokenFor("bob", alice)).toBeNull())
+  it("holds every trip while signed out", () => expect(tokenFor("alice", null)).toBeNull())
+  it("holds a trip with no owner", () => expect(tokenFor(null, alice)).toBeNull())
 })

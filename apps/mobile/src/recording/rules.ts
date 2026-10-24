@@ -29,3 +29,10 @@ export async function retryBusy<T>(fn: () => Promise<T>, tries = 5): Promise<T> 
     }
   }
 }
+
+/**
+ * The token to send one outbox call with: the live session's token if its user owns the trip, else null.
+ * The outbox checks this before every call, because Clerk can switch accounts while an upload is in flight.
+ */
+export const tokenFor = (owner: string | null, auth: { userId: string; token: string } | null) =>
+  auth !== null && owner === auth.userId ? auth.token : null

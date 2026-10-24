@@ -26,12 +26,18 @@ final class MotionMonitor: NSObject, CLLocationManagerDelegate {
     locationManager.delegate = self
   }
 
+  /// Guards the enabled flag and the pending start together. CoreMotion results arrive on main and JS calls
+  /// setEnabled on its own thread, so a drive must not be saved between turning detection off and clearing it.
+  private static let lock = NSLock()
+
   /// Saves the flag at once, so isEnabled returns the new value right after. The CLLocationManager calls run on main.
   static func setEnabled(_ enabled: Bool) {
     let defaults = UserDefaults.standard
+    lock.lock()
     defaults.set(enabled, forKey: enabledKey)
     // A drive found before detection was turned off must not start a trip later.
     if !enabled { defaults.removeObject(forKey: pendingKey) }
+    lock.unlock()
     DispatchQueue.main.async {
       MotionMonitor.shared.updateMonitoring()
     }
@@ -49,6 +55,8 @@ final class MotionMonitor: NSObject, CLLocationManagerDelegate {
   /// Returns the pending drive start in epoch ms and clears it. Safe on any thread.
   static func takePendingDriveStart() -> Double? {
     let defaults = UserDefaults.standard
+    lock.lock()
+    defer { lock.unlock() }
     guard let at = defaults.object(forKey: pendingKey) as? Double else { return nil }
     defaults.removeObject(forKey: pendingKey)
     return at
@@ -65,16 +73,20 @@ final class MotionMonitor: NSObject, CLLocationManagerDelegate {
   }
 
   private func driveDetected(startedAt: Date) {
-    // Detection was turned off while the CoreMotion query ran.
-    guard Self.isEnabled else { return }
     let defaults = UserDefaults.standard
     let at = (startedAt.timeIntervalSince1970 * 1000).rounded()
+    Self.lock.lock()
+    // Skip if detection was turned off while the CoreMotion query ran.
     // Every significant change during one automotive interval finds the same start. Report each interval once.
     // A newer interval passes even right after the last one. If a trip still records, JS ignores the extra start.
-    if at <= defaults.double(forKey: Self.lastDriveStartKey) { return }
-    defaults.set(at, forKey: Self.lastDriveStartKey)
-    defaults.set(at, forKey: Self.pendingKey)
-    onDrive?(at)
+    let isNew = Self.isEnabled && at > defaults.double(forKey: Self.lastDriveStartKey)
+    if isNew {
+      defaults.set(at, forKey: Self.lastDriveStartKey)
+      defaults.set(at, forKey: Self.pendingKey)
+    }
+    Self.lock.unlock()
+    // Sent outside the lock. JS checks isAutoStartEnabled() again before it starts a trip.
+    if isNew { onDrive?(at) }
   }
 }
 

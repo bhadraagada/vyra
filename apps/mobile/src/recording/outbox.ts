@@ -1,14 +1,12 @@
 import { getClerkInstance } from "@clerk/expo"
-import { tokenCache } from "@clerk/expo/token-cache"
 import { api } from "@vyra/backend/convex/_generated/api"
 import { ConvexHttpClient } from "convex/browser"
 import type { FunctionArgs } from "convex/server"
-import Constants from "expo-constants"
 import type { SQLiteDatabase } from "expo-sqlite"
 import { clerkKey, convexUrl, isConfigured } from "../env"
-import { db, LEGACY_OWNER, write } from "./db"
+import { db, write } from "./db"
 import { notify } from "./events"
-import { backoffMs, isPermanent } from "./rules"
+import { backoffMs, isPermanent, tokenFor } from "./rules"
 
 /** One queued Convex call. Rows are sent strictly in id order, so start, chunks and finish keep their order. */
 export type OutboxCall =
@@ -30,7 +28,10 @@ type OutboxRow = {
 export const enqueue = (tx: SQLiteDatabase, call: OutboxCall) =>
   tx.runAsync("INSERT INTO outbox (client_id, kind, args) VALUES (?, ?, ?)", call.args.clientId, call.kind, JSON.stringify(call.args))
 
-function send(client: ConvexHttpClient, call: OutboxCall) {
+/** Sends one call with a new client, so no call reuses the token of an earlier one. */
+function send(token: string, call: OutboxCall) {
+  const client = new ConvexHttpClient(convexUrl)
+  client.setAuth(token)
   switch (call.kind) {
     case "start":
       return client.mutation(api.trips.start, call.args)
@@ -41,26 +42,42 @@ function send(client: ConvexHttpClient, call: OutboxCall) {
   }
 }
 
-let clerkLoad: Promise<void> | undefined
+let clerkReady: Promise<void> | undefined
 
 /**
- * The signed-in Clerk user and a fresh Convex token, or null while Clerk is not loaded or nobody is signed in.
- * A headless background launch mounts no ClerkProvider, so there this loads Clerk once with the provider's key and token cache.
- * In the app, the provider loads Clerk. Clerk has no guard against a second load in parallel, so this does not load it there.
+ * The one wait for Clerk that all upload code shares. Resolves when Clerk is loaded, when its load fails, or after 20 s.
+ * Upload code never calls clerk.load(). ClerkProvider calls it on mount while Clerk is not loaded, and clerk-js has
+ * no guard against a second load in parallel. Every JS run of this app mounts the provider: iOS starts React Native
+ * only into a scene window (ExpoAppSceneDelegate), and upload code loads only through the root layout, which renders it.
  */
+function waitForClerk(clerk: ReturnType<typeof getClerkInstance>) {
+  if (clerk.loaded) return Promise.resolve()
+  clerkReady ??= new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      clerk.off("status", onStatus)
+      resolve()
+    }
+    const onStatus = (status: string) => {
+      if (status !== "loading") done()
+    }
+    const timer = setTimeout(done, 20_000)
+    clerk.on("status", onStatus, { notify: true })
+  }).finally(() => {
+    clerkReady = undefined
+  })
+  return clerkReady
+}
+
+/** The live Clerk user and a fresh Convex token of the same session, or null while Clerk is not loaded or nobody is signed in. */
 async function session() {
-  const clerk = getClerkInstance({ publishableKey: clerkKey, tokenCache })
-  if (!clerk.loaded && Constants.isHeadless) {
-    // ClerkProvider passes standardBrowser: false on native. The default expects a browser.
-    clerkLoad ??= clerk.load({ standardBrowser: false }).catch((e: unknown) => {
-      clerkLoad = undefined
-      throw e
-    })
-    await clerkLoad
-  }
+  // No token cache here: the provider sets its own, and passing one would replace it.
+  const clerk = getClerkInstance({ publishableKey: clerkKey })
+  await waitForClerk(clerk)
   if (!clerk.loaded) return null
-  const userId = clerk.user?.id
-  const token = await clerk.session?.getToken({ template: "convex" })
+  const active = clerk.session
+  const token = await active?.getToken({ template: "convex" })
+  const userId = active?.user.id
   return userId && token ? { userId, token } : null
 }
 
@@ -86,7 +103,6 @@ export function flush(force = false): Promise<void> {
 }
 
 async function drain(force: boolean) {
-  let client: ConvexHttpClient | null = null
   for (;;) {
     // The account table mirrors Clerk. The session check below still guards against a stale mirror.
     const row = await db.getFirstAsync<OutboxRow>(
@@ -94,16 +110,14 @@ async function drain(force: boolean) {
        WHERE trips.owner = (SELECT user_id FROM account WHERE id = 1) ORDER BY outbox.id LIMIT 1`,
     )
     if (!row || (!force && row.next_at > Date.now())) break
-    if (!client) {
-      const auth = await session()
-      if (!auth || auth.userId !== row.owner) return
-      client = new ConvexHttpClient(convexUrl)
-      client.setAuth(auth.token)
-    }
+    // Clerk can switch accounts during the previous call, so every call checks the live user and takes a fresh token.
+    // On a mismatch the drain stops. setAccount() starts a new one when the mirror catches up.
+    const token = tokenFor(row.owner, await session())
+    if (!token) return
     const args: unknown = JSON.parse(row.args)
     // The network call runs outside the write queue. Only the SQLite writes after it go through write().
     try {
-      await send(client, { kind: row.kind, args } as OutboxCall)
+      await send(token, { kind: row.kind, args } as OutboxCall)
       await write(async (tx) => {
         await tx.runAsync("DELETE FROM outbox WHERE id = ?", row.id)
         await tx.runAsync("UPDATE trips SET last_error = NULL WHERE client_id = ?", row.client_id)
@@ -156,18 +170,17 @@ export async function deleteLocalTrip(clientId: string) {
 
 /**
  * Saves the signed-in Clerk user, or null after sign-out. The root layout calls it on every auth change.
- * New trips take this user as owner, and flush() sends only this user's trips.
+ * New trips take this user as owner. flush() sends only this user's trips, so it runs again for the new user.
  */
 export async function setAccount(userId: string | null) {
   await write(async (tx) => {
     await tx.runAsync("INSERT OR REPLACE INTO account (id, user_id) VALUES (1, ?)", userId)
-    // Finds rows only on the first call after the owner migration. That call sees the session restored from before the update.
-    await tx.runAsync("UPDATE trips SET owner = ? WHERE owner = ?", userId, LEGACY_OWNER)
   })
   notify()
+  await flush(true)
 }
 
-/** Gives a trip recorded while nobody was signed in to the signed-in user, then uploads it. Call it only after the user confirms. */
+/** Gives a trip with no owner to the signed-in user, then uploads it. Call it only after the user confirms. */
 export async function claimTrip(clientId: string) {
   await write(async (tx) => {
     await tx.runAsync("UPDATE trips SET owner = (SELECT user_id FROM account WHERE id = 1) WHERE client_id = ? AND owner IS NULL", clientId)

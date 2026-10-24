@@ -6,7 +6,8 @@ import { retryBusy } from "./rules"
 /**
  * Local store. Every point lands here before any upload, so a dead zone or an app kill loses nothing.
  * - trips: local trips until all their outbox calls are sent. Then the trip and its points are deleted.
- *   owner is the Clerk user ID that was signed in when the trip started, or null if nobody was.
+ *   owner is the Clerk user ID that was signed in when the trip started. It is null if nobody was, or if the trip
+ *   is older than owners, until the user confirms the upload with claimTrip().
  * - points: GPS points. seq is null until the point is in an outbox chunk.
  * - outbox: Convex calls in send order (id).
  * - machine: the one persisted trip machine row.
@@ -60,13 +61,14 @@ CREATE TABLE IF NOT EXISTS account (
 );
 `)
 
-/** Owner of trips saved before v1. setAccount() gives them to the session restored at the first launch after the update. */
-export const LEGACY_OWNER = "legacy"
-
 // v1 adds trips.owner. Fresh installs run it too, on the empty table.
-if ((db.getFirstSync<{ user_version: number }>("PRAGMA user_version")?.user_version ?? 0) < 1) {
+// v2 makes trips that v1 tagged "legacy" unclaimed: nothing proves which account recorded them, so the user confirms each one.
+const version = db.getFirstSync<{ user_version: number }>("PRAGMA user_version")?.user_version ?? 0
+if (version < 2) {
   db.withTransactionSync(() =>
-    db.execSync(`ALTER TABLE trips ADD COLUMN owner TEXT; UPDATE trips SET owner = '${LEGACY_OWNER}'; PRAGMA user_version = 1;`),
+    db.execSync(
+      `${version < 1 ? "ALTER TABLE trips ADD COLUMN owner TEXT;" : ""} UPDATE trips SET owner = NULL WHERE owner = 'legacy'; PRAGMA user_version = 2;`,
+    ),
   )
 }
 
@@ -97,7 +99,7 @@ export type LocalTrip = {
   last_error: string | null
   /** Set when the backend rejected a call for good. The trip then stays local until the user deletes it. */
   failed: string | null
-  /** Clerk user ID, or null when nobody was signed in. Only the owner's session uploads the trip. */
+  /** Clerk user ID, or null until the user claims the trip. Only the owner's session uploads the trip. */
   owner: string | null
 }
 

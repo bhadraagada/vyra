@@ -62,7 +62,7 @@ function LocalRow({ trip }: { trip: Local }) {
   const state = trip.failed
     ? `Upload failed: ${trip.failed}`
     : unowned
-      ? "Recorded while signed out. Tap to upload it to this account."
+      ? "No account. Tap to upload it to this account."
       : !ended
         ? "Recording on this phone"
         : trip.last_error
@@ -71,7 +71,7 @@ function LocalRow({ trip }: { trip: Local }) {
   const remove = { text: "Delete", style: "destructive", onPress: () => void deleteLocalTrip(trip.client_id) } as const
   const onPress = () =>
     unowned
-      ? Alert.alert("Upload to this account?", "Nobody was signed in when this trip was recorded.", [
+      ? Alert.alert("Upload to this account?", "This trip was recorded while signed out or before an app update.", [
           { text: "Cancel", style: "cancel" },
           ...(ended ? [remove] : []),
           { text: "Upload", onPress: () => void claimTrip(trip.client_id) },
