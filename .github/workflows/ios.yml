@@ -1,0 +1,63 @@
+name: iOS
+
+# Builds an unsigned VYRA.ipa. The owner signs it with Sideloadly.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - apps/mobile/**
+      - packages/**
+      - pnpm-lock.yaml
+      - .github/workflows/ios.yml
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      EXPO_PUBLIC_CONVEX_URL: ${{ vars.EXPO_PUBLIC_CONVEX_URL }}
+      EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ vars.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: xcodebuild -version
+      - name: Prebuild
+        working-directory: apps/mobile
+        run: npx expo prebuild --platform ios --no-install
+      - uses: actions/cache@v6
+        with:
+          path: ~/Library/Caches/CocoaPods
+          key: pods-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pods-${{ runner.os }}-
+      - name: Pod install
+        working-directory: apps/mobile/ios
+        run: pod install
+      - name: Build
+        working-directory: apps/mobile/ios
+        run: |
+          # Full log goes to an artifact. The step log shows only the errors.
+          xcodebuild -workspace VYRA.xcworkspace -scheme VYRA -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build > xcodebuild.log 2>&1 || { grep -E "error:|fatal" xcodebuild.log | head -80; tail -40 xcodebuild.log; exit 1; }
+          test -d build/Build/Products/Release-iphoneos/VYRA.app
+      - name: Package ipa
+        working-directory: apps/mobile/ios
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/VYRA.app Payload/
+          zip -qry vyra-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vyra-unsigned
+          path: apps/mobile/ios/vyra-unsigned.ipa
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: xcodebuild-log
+          path: apps/mobile/ios/xcodebuild.log
