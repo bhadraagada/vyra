@@ -72,7 +72,12 @@ export default defineSchema({
     .index("by_owner_started", ["ownerId", "startedAt"])
     .index("by_owner_client", ["ownerId", "clientId"])
     .index("by_owner_route", ["ownerId", "routeKey"])
-    .index("by_owner_vehicle_started", ["ownerId", "vehicleId", "startedAt"]),
+    .index("by_owner_vehicle_started", ["ownerId", "vehicleId", "startedAt"])
+    .index("by_owner_status", ["ownerId", "status"])
+    // For analytics.records: read the top trip instead of scanning every trip.
+    .index("by_owner_distance", ["ownerId", "distanceM"])
+    .index("by_owner_duration", ["ownerId", "durationS"])
+    .index("by_owner_max_speed", ["ownerId", "maxSpeedMps"]),
 
   tripChunks: defineTable({
     ownerId: v.string(),

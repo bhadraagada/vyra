@@ -8,13 +8,25 @@
  * @module
  */
 
+import type * as analytics from "../analytics.js";
+import type * as garage from "../garage.js";
+import type * as lib from "../lib.js";
+import type * as trips from "../trips.js";
+import type * as vehicles from "../vehicles.js";
+
 import type {
   ApiFromModules,
   FilterApi,
   FunctionReference,
 } from "convex/server";
 
-declare const fullApi: ApiFromModules<{}>;
+declare const fullApi: ApiFromModules<{
+  analytics: typeof analytics;
+  garage: typeof garage;
+  lib: typeof lib;
+  trips: typeof trips;
+  vehicles: typeof vehicles;
+}>;
 
 /**
  * A utility for referencing Convex functions in your app's public API.
