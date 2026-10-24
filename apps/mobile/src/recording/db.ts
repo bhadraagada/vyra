@@ -1,12 +1,16 @@
 import * as SQLite from "expo-sqlite"
+import type { SQLiteDatabase } from "expo-sqlite"
 import type { GpsPoint, StartSource, StopReason } from "@vyra/core"
+import { retryBusy } from "./rules"
 
 /**
  * Local store. Every point lands here before any upload, so a dead zone or an app kill loses nothing.
  * - trips: local trips until all their outbox calls are sent. Then the trip and its points are deleted.
+ *   owner is the Clerk user ID that was signed in when the trip started, or null if nobody was.
  * - points: GPS points. seq is null until the point is in an outbox chunk.
  * - outbox: Convex calls in send order (id).
  * - machine: the one persisted trip machine row.
+ * - account: the signed-in Clerk user ID, mirrored by the root layout. Background starts read it.
  */
 export const db = SQLite.openDatabaseSync("vyra.db")
 
@@ -50,7 +54,36 @@ CREATE TABLE IF NOT EXISTS machine (
   client_id TEXT,
   last_point TEXT
 );
+CREATE TABLE IF NOT EXISTS account (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  user_id TEXT
+);
 `)
+
+/** Owner of trips saved before v1. setAccount() gives them to the session restored at the first launch after the update. */
+export const LEGACY_OWNER = "legacy"
+
+// v1 adds trips.owner. Fresh installs run it too, on the empty table.
+if ((db.getFirstSync<{ user_version: number }>("PRAGMA user_version")?.user_version ?? 0) < 1) {
+  db.withTransactionSync(() =>
+    db.execSync(`ALTER TABLE trips ADD COLUMN owner TEXT; UPDATE trips SET owner = '${LEGACY_OWNER}'; PRAGMA user_version = 1;`),
+  )
+}
+
+// Every local write goes through this one queue, in call order, so two writers never fight for the lock.
+// Never await a network call inside it.
+let queue: Promise<unknown> = Promise.resolve()
+export function serial<T>(fn: () => Promise<T>): Promise<T> {
+  const run = queue.then(fn)
+  queue = run.catch((e: unknown) => console.warn("local write failed", e))
+  return run
+}
+
+/** One write transaction. Use it only inside serial(). It runs on its own connection, so it retries while SQLite is locked. */
+export const transaction = (task: (tx: SQLiteDatabase) => Promise<void>) => retryBusy(() => db.withExclusiveTransactionAsync(task))
+
+/** Queues one write transaction. */
+export const write = (task: (tx: SQLiteDatabase) => Promise<void>) => serial(() => transaction(task))
 
 export type LocalTrip = {
   client_id: string
@@ -64,6 +97,8 @@ export type LocalTrip = {
   last_error: string | null
   /** Set when the backend rejected a call for good. The trip then stays local until the user deletes it. */
   failed: string | null
+  /** Clerk user ID, or null when nobody was signed in. Only the owner's session uploads the trip. */
+  owner: string | null
 }
 
 export type PointRow = GpsPoint & { id: number }
@@ -77,14 +112,21 @@ export const tripPoints = (clientId: string, unsent = false) =>
     clientId,
   )
 
-/** Local trips that still wait for upload, newest first, with the number of unsent calls. */
+const accountUser = "(SELECT user_id FROM account WHERE id = 1)"
+
+/** Local trips of the signed-in user and trips with no owner that still wait for upload, newest first, with the number of unsent calls. */
 export const pendingTrips = () =>
   db.getAllAsync<LocalTrip & { pending: number; points: number }>(
     `SELECT trips.*,
        (SELECT COUNT(*) FROM outbox WHERE outbox.client_id = trips.client_id) AS pending,
        (SELECT COUNT(*) FROM points WHERE points.client_id = trips.client_id) AS points
-     FROM trips ORDER BY started_at DESC`,
+     FROM trips WHERE owner IS NULL OR owner = ${accountUser} ORDER BY started_at DESC`,
   )
 
+/** Unsent calls of the signed-in user's trips. */
 export const outboxCount = async () =>
-  (await db.getFirstAsync<{ n: number }>("SELECT COUNT(*) AS n FROM outbox"))?.n ?? 0
+  (
+    await db.getFirstAsync<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM outbox JOIN trips USING (client_id) WHERE trips.owner = ${accountUser}`,
+    )
+  )?.n ?? 0

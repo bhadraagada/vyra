@@ -14,9 +14,7 @@ public class VyraMotionModule: Module {
     }
 
     Function("setAutoStartEnabled") { (enabled: Bool) in
-      DispatchQueue.main.async {
-        MotionMonitor.shared.setEnabled(enabled)
-      }
+      MotionMonitor.setEnabled(enabled)
     }
 
     Function("isAutoStartEnabled") {

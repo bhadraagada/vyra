@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { ConvexError } from "convex/values"
 import type { GpsPoint } from "@vyra/core"
-import { backoffMs, isPermanent, shouldStore } from "./rules"
+import { backoffMs, isBusy, isPermanent, retryBusy, shouldStore } from "./rules"
 
 const at = (t: number, lat: number): GpsPoint => ({ t, lat, lng: 0, speed: null, accuracy: 5, heading: null, altitude: null })
 
@@ -21,5 +21,31 @@ describe("outbox retry", () => {
     expect(isPermanent(new ConvexError("Trip not found"))).toBe(true)
     expect(isPermanent(new ConvexError("Not signed in"))).toBe(false)
     expect(isPermanent(new TypeError("Network request failed"))).toBe(false)
+  })
+})
+
+describe("retryBusy", () => {
+  const locked = new Error("Calling the 'execAsync' function has failed\n→ Caused by: Error code 5: database is locked")
+
+  it("knows SQLite lock errors", () => {
+    expect(isBusy(locked)).toBe(true)
+    expect(isBusy(new Error("Error code 6: database table is locked"))).toBe(true)
+    expect(isBusy(new Error("Error code 19: UNIQUE constraint failed"))).toBe(false)
+  })
+  it("runs again while the database is locked", async () => {
+    let calls = 0
+    const result = await retryBusy(async () => {
+      if (++calls < 3) throw locked
+      return "saved"
+    })
+    expect([result, calls]).toEqual(["saved", 3])
+  })
+  it("gives up after the last try and does not retry other errors", async () => {
+    let calls = 0
+    await expect(retryBusy(() => Promise.reject(locked).finally(() => calls++), 2)).rejects.toBe(locked)
+    expect(calls).toBe(2)
+    const other = new Error("Error code 19: UNIQUE constraint failed")
+    await expect(retryBusy(() => Promise.reject(other).finally(() => calls++))).rejects.toBe(other)
+    expect(calls).toBe(3)
   })
 })

@@ -16,6 +16,7 @@ export default function Record() {
   const vehicles = useQuery(api.vehicles.list)
   const access = useAccess()
   const now = useNow(live?.state.kind === "recording")
+  const [startError, setStartError] = useState<string | null>(null)
 
   if (!live) return <View className="flex-1 bg-black" />
   const { state, stats, speedMps } = live
@@ -51,9 +52,10 @@ export default function Record() {
             title="Start trip"
             tone="primary"
             disabled={access.value === "denied"}
-            onPress={() => void requestLocation().then(access.refresh).then(() => startTrip("manual"))}
+            onPress={() => void requestLocation().then(access.refresh).then(() => startTrip("manual")).then(setStartError)}
           />
         )}
+        {!recording && startError && <Text className="text-base text-red-500">{startError}</Text>}
 
         <AccessNote access={access.value} canAsk={access.canAsk} onAsk={() => void requestLocation().then(access.refresh)} />
       </ScrollView>

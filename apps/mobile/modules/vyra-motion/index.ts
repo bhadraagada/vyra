@@ -26,7 +26,10 @@ export function isAvailable(): boolean {
   return native?.isAvailable() ?? false
 }
 
-/** Turns significant location change monitoring on or off. iOS keeps it across relaunch. */
+/**
+ * Turns significant location change monitoring on or off. iOS keeps it across relaunch.
+ * isAutoStartEnabled() returns the new value right after. Turning it off also clears a pending drive start.
+ */
 export function setAutoStartEnabled(enabled: boolean): void {
   native?.setAutoStartEnabled(enabled)
 }
@@ -43,7 +46,7 @@ export function stopActivityUpdates(): void {
   native?.stopActivityUpdates()
 }
 
-/** Drive start in epoch ms found while JS was not listening. Cleared on read. */
+/** Start in epoch ms of the last detected drive, kept until read so a launch where JS was not listening still sees it. Cleared on read. */
 export function takePendingDriveStart(): number | null {
   return native?.takePendingDriveStart() ?? null
 }

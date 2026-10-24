@@ -2,7 +2,7 @@ import { useClerk, useUser } from "@clerk/expo"
 import { api } from "@vyra/backend/convex/_generated/api"
 import { useQuery } from "convex/react"
 import { useState } from "react"
-import { ScrollView, Switch, Text, View } from "react-native"
+import { Alert, ScrollView, Switch, Text, View } from "react-native"
 import { SafeAreaView } from "react-native-safe-area-context"
 import * as motion from "../../../modules/vyra-motion"
 import { requestLocation } from "../../../src/permissions"
@@ -31,6 +31,14 @@ export default function Settings() {
     }
     motion.setAutoStartEnabled(on)
     setAutoStart(motion.isAutoStartEnabled())
+  }
+
+  function confirmSignOut() {
+    if (!pending) return void signOut()
+    Alert.alert("Uploads waiting", `${pending} uploads stay on this phone. They upload when you sign in to this account again.`, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Sign out", style: "destructive", onPress: () => void signOut() },
+    ])
   }
 
   return (
@@ -68,7 +76,7 @@ export default function Settings() {
 
         <Heading>Account</Heading>
         <Text className="pb-3 text-base text-white">{user?.primaryEmailAddress?.emailAddress}</Text>
-        <Button title="Sign out" tone="danger" onPress={() => void signOut()} />
+        <Button title="Sign out" tone="danger" onPress={confirmSignOut} />
       </ScrollView>
     </SafeAreaView>
   )

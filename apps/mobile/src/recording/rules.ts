@@ -14,3 +14,18 @@ export const backoffMs = (attempts: number) => Math.min(5_000 * 2 ** Math.max(0,
  * so the outbox drops that call. "Not signed in" is the exception: it passes once a token is set.
  */
 export const isPermanent = (e: unknown) => e instanceof ConvexError && e.data !== "Not signed in"
+
+/** True when SQLite reports the database as locked (codes 5 and 6): another connection holds the write lock. */
+export const isBusy = (e: unknown) => e instanceof Error && /Error code [56]\b|database (table )?is locked/.test(e.message)
+
+/** Runs `fn`. While SQLite reports the database as locked, waits 50, 100, 200 ... ms and runs it again, `tries` times in all. */
+export async function retryBusy<T>(fn: () => Promise<T>, tries = 5): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn()
+    } catch (e) {
+      if (attempt >= tries || !isBusy(e)) throw e
+      await new Promise((resolve) => setTimeout(resolve, 50 * 2 ** (attempt - 1)))
+    }
+  }
+}

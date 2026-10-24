@@ -4,14 +4,14 @@ import ExpoModulesCore
 
 /// Watches significant location changes and asks CoreMotion if the user drives.
 /// The module and the app delegate subscriber share it. Use the instance only on the main thread.
+/// The static members are safe on any thread.
 final class MotionMonitor: NSObject, CLLocationManagerDelegate {
   static let shared = MotionMonitor()
 
   private static let enabledKey = "vyraMotion.autoStartEnabled"
   private static let pendingKey = "vyraMotion.pendingDriveStart"
-  private static let lastDetectedKey = "vyraMotion.lastDetectedAt"
+  private static let lastDriveStartKey = "vyraMotion.lastDriveStart"
   private static let lookback: TimeInterval = 5 * 60
-  private static let dedupe: TimeInterval = 10 * 60
 
   private let locationManager = CLLocationManager()
   private let activityManager = CMMotionActivityManager()
@@ -26,9 +26,20 @@ final class MotionMonitor: NSObject, CLLocationManagerDelegate {
     locationManager.delegate = self
   }
 
-  func setEnabled(_ enabled: Bool) {
-    UserDefaults.standard.set(enabled, forKey: Self.enabledKey)
-    if enabled {
+  /// Saves the flag at once, so isEnabled returns the new value right after. The CLLocationManager calls run on main.
+  static func setEnabled(_ enabled: Bool) {
+    let defaults = UserDefaults.standard
+    defaults.set(enabled, forKey: enabledKey)
+    // A drive found before detection was turned off must not start a trip later.
+    if !enabled { defaults.removeObject(forKey: pendingKey) }
+    DispatchQueue.main.async {
+      MotionMonitor.shared.updateMonitoring()
+    }
+  }
+
+  /// Starts or stops significant change monitoring to match the saved flag. Main thread only.
+  func updateMonitoring() {
+    if Self.isEnabled {
       locationManager.startMonitoringSignificantLocationChanges()
     } else {
       locationManager.stopMonitoringSignificantLocationChanges()
@@ -47,19 +58,21 @@ final class MotionMonitor: NSObject, CLLocationManagerDelegate {
     guard CMMotionActivityManager.isActivityAvailable() else { return }
     let now = Date()
     activityManager.queryActivityStarting(from: now.addingTimeInterval(-Self.lookback), to: now, to: .main) { [weak self] activities, _ in
-      guard let drive = activities?.first(where: { $0.automotive && $0.confidence != .low }) else { return }
+      // The latest automotive interval. An earlier one in the window can be the drive that already ended.
+      guard let drive = activities?.last(where: { $0.automotive && $0.confidence != .low }) else { return }
       self?.driveDetected(startedAt: drive.startDate)
     }
   }
 
   private func driveDetected(startedAt: Date) {
+    // Detection was turned off while the CoreMotion query ran.
+    guard Self.isEnabled else { return }
     let defaults = UserDefaults.standard
-    let now = Date().timeIntervalSince1970
-    // Every significant change during one drive finds automotive again. Report the drive once.
-    if now - defaults.double(forKey: Self.lastDetectedKey) < Self.dedupe { return }
-    defaults.set(now, forKey: Self.lastDetectedKey)
-
     let at = (startedAt.timeIntervalSince1970 * 1000).rounded()
+    // Every significant change during one automotive interval finds the same start. Report each interval once.
+    // A newer interval passes even right after the last one. If a trip still records, JS ignores the extra start.
+    if at <= defaults.double(forKey: Self.lastDriveStartKey) { return }
+    defaults.set(at, forKey: Self.lastDriveStartKey)
     defaults.set(at, forKey: Self.pendingKey)
     onDrive?(at)
   }
@@ -73,7 +86,7 @@ public class VyraMotionAppDelegateSubscriber: ExpoAppDelegateSubscriber {
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
     if MotionMonitor.isEnabled {
-      MotionMonitor.shared.setEnabled(true)
+      MotionMonitor.shared.updateMonitoring()
     }
     return true
   }

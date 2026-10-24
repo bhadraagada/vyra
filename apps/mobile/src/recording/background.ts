@@ -28,15 +28,28 @@ TaskManager.defineTask<{ locations: Location.LocationObject[] }>(LOCATION_TASK, 
   await onLocations(data.locations.map(toPoint))
 })
 
-motion.addDriveDetectedListener(({ at }) => void startTrip("motion", null, at))
+/** Starts a trip for a drive that native code found. Resolves true when the trip records. */
+async function startMotionTrip(at: number) {
+  const error = await startTrip("motion", null, at)
+  if (error) console.warn("drive detection did not start a trip:", error)
+  return error === null
+}
+
+// Native code also stores the drive as pending, for a launch where JS was not listening. Clear it after the start is saved.
+// Left pending, it would start a second, stale trip at the next launch.
+motion.addDriveDetectedListener(({ at }) => {
+  void startMotionTrip(at).then((started) => started && motion.takePendingDriveStart())
+})
 motion.addActivityListener(({ activity, confidence, at }) => {
   if (confidence !== "low") void onActivity(activity, at)
 })
 
 void resumeTracking().catch((e: unknown) => console.warn("resume tracking failed", e))
 
+// A drive found more than 30 min ago is over or nearly over. A trip started now would be wrong.
+const PENDING_MAX_AGE_MS = 30 * 60_000
 const pending = motion.takePendingDriveStart()
-if (pending !== null) void startTrip("motion", null, pending)
+if (pending !== null && Date.now() - pending < PENDING_MAX_AGE_MS) void startMotionTrip(pending)
 
 AppState.addEventListener("change", (state) => {
   if (state === "active") void flush(true)

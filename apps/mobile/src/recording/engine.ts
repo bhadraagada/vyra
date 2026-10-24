@@ -15,7 +15,7 @@ import * as Crypto from "expo-crypto"
 import * as Location from "expo-location"
 import type { SQLiteDatabase } from "expo-sqlite"
 import * as motion from "../../modules/vyra-motion"
-import { db, tripPoints, type LocalTrip, type PointRow } from "./db"
+import { db, serial, transaction, tripPoints, type LocalTrip, type PointRow } from "./db"
 import { notify } from "./events"
 import { enqueue, flush } from "./outbox"
 import { shouldStore } from "./rules"
@@ -40,105 +40,113 @@ async function machine(): Promise<Machine> {
   return cached
 }
 
-// Location updates, motion events and taps can arrive together. Each event runs alone, in arrival order.
-let queue: Promise<unknown> = Promise.resolve()
-function serial<T>(fn: () => Promise<T>): Promise<T> {
-  const run = queue.then(fn)
-  queue = run.catch((e: unknown) => console.warn("trip event failed", e))
-  return run
-}
-
+// Location updates, motion events and taps can arrive together. Each event runs alone, in arrival order,
+// in the same queue as every other local write.
 export const dispatch = (event: TripEvent) => serial(() => step(event))
 
 /**
  * Runs one event through the trip machine from @vyra/core and writes the result to SQLite in one transaction:
  * the new local trip and its `start` call, the stored point, full chunks, and on completion the last chunk and `finish`.
+ * A new trip starts GPS first. If GPS fails to start, this throws and saves nothing.
  */
 async function step(event: TripEvent) {
   const prev = await machine()
-  let state = nextState(prev.state, event)
+  const first = nextState(prev.state, event)
+  const starting = prev.state.kind === "idle" && first.kind === "recording"
+  let state = first
   let { clientId, lastPoint } = prev
   let upload = false
 
-  await db.withExclusiveTransactionAsync(async (tx) => {
-    if (prev.state.kind === "idle" && state.kind === "recording") {
-      clientId = Crypto.randomUUID()
-      lastPoint = null
-      await tx.runAsync(
-        "INSERT INTO trips (client_id, started_at, start_source, vehicle_key) VALUES (?, ?, ?, ?)",
-        clientId,
-        state.startedAt,
-        state.source,
-        state.vehicleKey,
-      )
-      await enqueue(tx, {
-        kind: "start",
-        args: {
+  if (starting) await setTracking(true)
+  try {
+    await transaction(async (tx) => {
+      // A locked database runs this again, so start from the saved machine each time.
+      state = first
+      ;({ clientId, lastPoint } = prev)
+      upload = false
+      if (starting && state.kind === "recording") {
+        clientId = Crypto.randomUUID()
+        lastPoint = null
+        // The owner is the user signed in now. setAccount() keeps that user in the account table.
+        await tx.runAsync(
+          "INSERT INTO trips (client_id, started_at, start_source, vehicle_key, owner) VALUES (?, ?, ?, ?, (SELECT user_id FROM account WHERE id = 1))",
           clientId,
-          startSource: state.source,
-          startedAt: state.startedAt,
-          tzOffsetMin: localTzOffsetMin(new Date(state.startedAt)),
-          vehicleKey: state.vehicleKey,
-        },
-      })
-      upload = true
-    }
-    if (!clientId) return
+          state.startedAt,
+          state.source,
+          state.vehicleKey,
+        )
+        await enqueue(tx, {
+          kind: "start",
+          args: {
+            clientId,
+            startSource: state.source,
+            startedAt: state.startedAt,
+            tzOffsetMin: localTzOffsetMin(new Date(state.startedAt)),
+            vehicleKey: state.vehicleKey,
+          },
+        })
+        upload = true
+      }
+      if (!clientId) return
 
-    if (state.kind === "recording" && prev.state.kind === "recording" && state.vehicleKey !== prev.state.vehicleKey) {
-      await tx.runAsync("UPDATE trips SET vehicle_key = ? WHERE client_id = ?", state.vehicleKey, clientId)
-    }
+      if (state.kind === "recording" && prev.state.kind === "recording" && state.vehicleKey !== prev.state.vehicleKey) {
+        await tx.runAsync("UPDATE trips SET vehicle_key = ? WHERE client_id = ?", state.vehicleKey, clientId)
+      }
 
-    if (prev.state.kind === "recording" && event.type === "location" && shouldStore(lastPoint, event.point)) {
-      const p = event.point
+      if (prev.state.kind === "recording" && event.type === "location" && shouldStore(lastPoint, event.point)) {
+        const p = event.point
+        await tx.runAsync(
+          "INSERT INTO points (client_id, t, lat, lng, speed, accuracy, heading, altitude) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          clientId,
+          p.t,
+          p.lat,
+          p.lng,
+          p.speed,
+          p.accuracy,
+          p.heading,
+          p.altitude,
+        )
+        lastPoint = p
+        upload = (await cutChunks(tx, clientId, false)) || upload
+      }
+
+      if (state.kind === "completed") {
+        await tx.runAsync(
+          "UPDATE trips SET ended_at = ?, stop_reason = ?, vehicle_key = ? WHERE client_id = ?",
+          state.endedAt,
+          state.reason,
+          state.vehicleKey,
+          clientId,
+        )
+        await cutChunks(tx, clientId, true)
+        // The server drops points after endedAt, so the phone sends all of them.
+        await enqueue(tx, {
+          kind: "finish",
+          args: { clientId, endedAt: state.endedAt, stopReason: state.reason, vehicleKey: state.vehicleKey },
+        })
+        state = nextState(state, { type: "reset" })
+        clientId = null
+        lastPoint = null
+        upload = true
+      }
+
       await tx.runAsync(
-        "INSERT INTO points (client_id, t, lat, lng, speed, accuracy, heading, altitude) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO machine (id, state, client_id, last_point) VALUES (1, ?, ?, ?)",
+        JSON.stringify(state),
         clientId,
-        p.t,
-        p.lat,
-        p.lng,
-        p.speed,
-        p.accuracy,
-        p.heading,
-        p.altitude,
+        lastPoint && JSON.stringify(lastPoint),
       )
-      lastPoint = p
-      upload = (await cutChunks(tx, clientId, false)) || upload
-    }
-
-    if (state.kind === "completed") {
-      await tx.runAsync(
-        "UPDATE trips SET ended_at = ?, stop_reason = ?, vehicle_key = ? WHERE client_id = ?",
-        state.endedAt,
-        state.reason,
-        state.vehicleKey,
-        clientId,
-      )
-      await cutChunks(tx, clientId, true)
-      // The server drops points after endedAt, so the phone sends all of them.
-      await enqueue(tx, {
-        kind: "finish",
-        args: { clientId, endedAt: state.endedAt, stopReason: state.reason, vehicleKey: state.vehicleKey },
-      })
-      state = nextState(state, { type: "reset" })
-      clientId = null
-      lastPoint = null
-      upload = true
-    }
-
-    await tx.runAsync(
-      "INSERT OR REPLACE INTO machine (id, state, client_id, last_point) VALUES (1, ?, ?, ?)",
-      JSON.stringify(state),
-      clientId,
-      lastPoint && JSON.stringify(lastPoint),
-    )
-  })
+    })
+  } catch (e) {
+    if (starting) await setTracking(false).catch((err: unknown) => console.warn("location updates failed", err))
+    throw e
+  }
 
   cached = { state, clientId, lastPoint }
   notify()
   if (upload) void flush()
-  if (prev.state.kind !== state.kind) {
-    // The trip is saved either way. Without GPS it shows as recording until the user stops it.
+  if (!starting && prev.state.kind !== state.kind) {
+    // The stop is saved either way. A failure here leaves GPS on until the next relaunch.
     await setTracking(state.kind === "recording").catch((e: unknown) => console.warn("location updates failed", e))
   }
 }
@@ -180,20 +188,26 @@ async function setTracking(on: boolean) {
 }
 
 /**
- * Starts a trip if location access allows it. Returns false without access.
+ * Starts a trip, or joins the one that records. Returns null on success, else a message for the user.
+ * No trip is saved when location access is missing or GPS fails to start.
  * Motion starts happen in the background, where GPS needs "Always" access.
  */
-export async function startTrip(source: StartSource, vehicleKey: string | null = null, at = Date.now()) {
+export async function startTrip(source: StartSource, vehicleKey: string | null = null, at = Date.now()): Promise<string | null> {
   const access = source === "motion" ? Location.getBackgroundPermissionsAsync() : Location.getForegroundPermissionsAsync()
-  if (!(await access).granted) return false
-  await dispatch({ type: "start", at, source, vehicleKey })
-  return true
+  if (!(await access).granted) return source === "motion" ? "Location access is not set to Always." : "Location access is off."
+  try {
+    await dispatch({ type: "start", at, source, vehicleKey })
+    return null
+  } catch (e) {
+    return `Could not start the trip. ${e instanceof Error ? e.message : String(e)}`
+  }
 }
 
 export const stopTrip = (reason: "manual" | "disconnect") => dispatch({ type: "stop", at: Date.now(), reason })
 
 export async function onLocations(points: GpsPoint[]) {
-  for (const point of points) await dispatch({ type: "location", point })
+  // serial() logs a failed point. The rest of the batch still runs.
+  for (const point of points) await dispatch({ type: "location", point }).catch(() => undefined)
   // Cheap when the queue is empty. This is how retries run while the app is in the background.
   void flush()
 }

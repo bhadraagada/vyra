@@ -7,7 +7,7 @@ import { SafeAreaView } from "react-native-safe-area-context"
 import { dateTime, duration, km, kmh } from "../../../src/format"
 import { pendingTrips } from "../../../src/recording/db"
 import { useLocal } from "../../../src/recording/events"
-import { deleteLocalTrip } from "../../../src/recording/outbox"
+import { claimTrip, deleteLocalTrip } from "../../../src/recording/outbox"
 
 /** Trips tab: trips on this phone that still wait for upload, then all trips from Convex, newest first. */
 export default function Trips() {
@@ -55,23 +55,35 @@ function TripRow({ trip }: { trip: Doc<"trips"> }) {
 
 type Local = NonNullable<Awaited<ReturnType<typeof pendingTrips>>>[number]
 
+/** A trip on this phone. Tap a failed trip to delete it. Tap a trip with no owner to upload it to this account or delete it. */
 function LocalRow({ trip }: { trip: Local }) {
+  const unowned = trip.owner === null
+  const ended = trip.ended_at !== null
   const state = trip.failed
     ? `Upload failed: ${trip.failed}`
-    : trip.ended_at === null
-      ? "Recording on this phone"
-      : trip.last_error
-        ? `Waiting to upload, ${trip.pending} left. Last error: ${trip.last_error}`
-        : `Uploading, ${trip.pending} left`
-  const remove = () =>
-    Alert.alert("Delete local copy?", "This trip was not uploaded. Deleting removes its points from this phone.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: () => void deleteLocalTrip(trip.client_id) },
-    ])
+    : unowned
+      ? "Recorded while signed out. Tap to upload it to this account."
+      : !ended
+        ? "Recording on this phone"
+        : trip.last_error
+          ? `Waiting to upload, ${trip.pending} left. Last error: ${trip.last_error}`
+          : `Uploading, ${trip.pending} left`
+  const remove = { text: "Delete", style: "destructive", onPress: () => void deleteLocalTrip(trip.client_id) } as const
+  const onPress = () =>
+    unowned
+      ? Alert.alert("Upload to this account?", "Nobody was signed in when this trip was recorded.", [
+          { text: "Cancel", style: "cancel" },
+          ...(ended ? [remove] : []),
+          { text: "Upload", onPress: () => void claimTrip(trip.client_id) },
+        ])
+      : Alert.alert("Delete local copy?", "This trip was not uploaded. Deleting removes its points from this phone.", [
+          { text: "Cancel", style: "cancel" },
+          remove,
+        ])
   return (
     <Pressable
-      disabled={!trip.failed || trip.ended_at === null}
-      onPress={remove}
+      disabled={!unowned && (!trip.failed || !ended)}
+      onPress={onPress}
       className="border-b border-neutral-900 py-3"
     >
       <View className="flex-row justify-between">
