@@ -1,0 +1,84 @@
+import { api } from "@vyra/backend/convex/_generated/api"
+import type { Doc } from "@vyra/backend/convex/_generated/dataModel"
+import { usePaginatedQuery } from "convex/react"
+import { Link } from "expo-router"
+import { Alert, FlatList, Pressable, Text, View } from "react-native"
+import { SafeAreaView } from "react-native-safe-area-context"
+import { dateTime, duration, km, kmh } from "../../../src/format"
+import { pendingTrips } from "../../../src/recording/db"
+import { useLocal } from "../../../src/recording/events"
+import { deleteLocalTrip } from "../../../src/recording/outbox"
+
+/** Trips tab: trips on this phone that still wait for upload, then all trips from Convex, newest first. */
+export default function Trips() {
+  const { results, status, loadMore } = usePaginatedQuery(api.trips.list, {}, { initialNumItems: 30 })
+  const local = useLocal(pendingTrips)
+
+  return (
+    <SafeAreaView className="flex-1 bg-black" edges={["top"]}>
+      <FlatList
+        data={results}
+        keyExtractor={(t) => t._id}
+        renderItem={({ item }) => <TripRow trip={item} />}
+        onEndReached={() => status === "CanLoadMore" && loadMore(30)}
+        contentContainerClassName="px-5 pb-10"
+        ListHeaderComponent={
+          <View>
+            <Text className="pt-4 pb-2 text-3xl font-semibold text-white">Trips</Text>
+            {local?.map((t) => <LocalRow key={t.client_id} trip={t} />)}
+          </View>
+        }
+        ListEmptyComponent={
+          status === "LoadingFirstPage" ? undefined : <Text className="py-4 text-base text-white">No trips yet.</Text>
+        }
+      />
+    </SafeAreaView>
+  )
+}
+
+function TripRow({ trip }: { trip: Doc<"trips"> }) {
+  const recording = trip.status === "recording"
+  return (
+    <Link href={`/trip/${trip._id}`} asChild>
+      <Pressable className="border-b border-neutral-900 py-3 active:opacity-60">
+        <View className="flex-row justify-between">
+          <Text className="text-base text-white">{dateTime(trip.startedAt)}</Text>
+          <Text className="text-base font-semibold text-white">{km(trip.distanceM)}</Text>
+        </View>
+        <Text className="text-sm text-neutral-400">
+          {recording ? "Recording" : `${duration(trip.durationS)}  ·  avg ${kmh(trip.avgSpeedMps)}  ·  max ${kmh(trip.maxSpeedMps)}`}
+        </Text>
+      </Pressable>
+    </Link>
+  )
+}
+
+type Local = NonNullable<Awaited<ReturnType<typeof pendingTrips>>>[number]
+
+function LocalRow({ trip }: { trip: Local }) {
+  const state = trip.failed
+    ? `Upload failed: ${trip.failed}`
+    : trip.ended_at === null
+      ? "Recording on this phone"
+      : trip.last_error
+        ? `Waiting to upload, ${trip.pending} left. Last error: ${trip.last_error}`
+        : `Uploading, ${trip.pending} left`
+  const remove = () =>
+    Alert.alert("Delete local copy?", "This trip was not uploaded. Deleting removes its points from this phone.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: () => void deleteLocalTrip(trip.client_id) },
+    ])
+  return (
+    <Pressable
+      disabled={!trip.failed || trip.ended_at === null}
+      onPress={remove}
+      className="border-b border-neutral-900 py-3"
+    >
+      <View className="flex-row justify-between">
+        <Text className="text-base text-white">{dateTime(trip.started_at)}</Text>
+        <Text className="text-base text-white">{trip.points} points</Text>
+      </View>
+      <Text className={`text-sm ${trip.failed ? "text-red-500" : "text-neutral-400"}`}>{state}</Text>
+    </Pressable>
+  )
+}
