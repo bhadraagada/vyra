@@ -196,8 +196,12 @@ export async function startTrip(source: StartSource, vehicleKey: string | null =
   const access = source === "motion" ? Location.getBackgroundPermissionsAsync() : Location.getForegroundPermissionsAsync()
   if (!(await access).granted) return source === "motion" ? "Location access is not set to Always." : "Location access is off."
   try {
-    await dispatch({ type: "start", at, source, vehicleKey })
-    return null
+    // Check drive detection inside the queue, after the permission wait, so turning it off always wins.
+    return await serial(async () => {
+      if (source === "motion" && !motion.isAutoStartEnabled()) return "Drive detection is off."
+      await step({ type: "start", at, source, vehicleKey })
+      return null
+    })
   } catch (e) {
     return `Could not start the trip. ${e instanceof Error ? e.message : String(e)}`
   }

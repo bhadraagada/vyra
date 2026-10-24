@@ -30,8 +30,7 @@ TaskManager.defineTask<{ locations: Location.LocationObject[] }>(LOCATION_TASK, 
 
 /** Starts a trip for a drive that native code found. Resolves true when the trip records. */
 async function startMotionTrip(at: number) {
-  // Detection can be turned off after native code found the drive and before this event runs.
-  if (!motion.isAutoStartEnabled()) return false
+  // startTrip refuses a motion start when detection is off.
   const error = await startTrip("motion", null, at)
   if (error) console.warn("drive detection did not start a trip:", error)
   return error === null
