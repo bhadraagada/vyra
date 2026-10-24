@@ -25,6 +25,13 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Debug bundle
+        working-directory: apps/mobile
+        run: |
+          pnpm --version; pnpm config get enableGlobalVirtualStore; pnpm config get nodeLinker
+          ls ../../node_modules/.pnpm | grep -E "^(nativewind|react-native-css-interop)" || true
+          node -e "const p=require.resolve('nativewind/babel');console.log(p);console.log(require.resolve('@babel/plugin-transform-react-jsx',{paths:[require('path').dirname(p)]}))" || true
+          npx expo export:embed --entry-file node_modules/expo-router/entry.js --platform ios --dev false --reset-cache --bundle-output /tmp/main.jsbundle --assets-dest /tmp/assets 2>&1 | tail -60
       - run: xcodebuild -version
       - name: Prebuild
         working-directory: apps/mobile
